@@ -2,6 +2,7 @@
 /**
  * Post-build processing for Vite build output.
  *
+ * 0. Download ripgrep binary if needed
  * 1. Patch globalThis.Bun destructuring in third-party deps for Node.js compat
  * 2. Copy native addon files
  * 3. Generate dual entry points (cli-bun.js, cli-node.js)
@@ -9,11 +10,16 @@
 import { readdir, readFile, writeFile, cp } from 'node:fs/promises'
 import { chmodSync } from 'node:fs'
 import { join } from 'node:path'
+import { ensureRipgrep } from './download-rg.ts'
 
 const outdir = 'dist'
 
 async function postBuild() {
-  // Step 1: Patch globalThis.Bun destructuring in ALL output files
+  // Step 1: Ensure ripgrep binary is downloaded for the current platform
+  console.log('[build] Ensuring ripgrep binary...')
+  await ensureRipgrep()
+
+  // Step 2: Patch globalThis.Bun destructuring in ALL output files
   const BUN_DESTRUCTURE = /var \{([^}]+)\} = globalThis\.Bun;?/g
   const BUN_DESTRUCTURE_SAFE =
     'var {$1} = typeof globalThis.Bun !== "undefined" ? globalThis.Bun : {};'
@@ -57,7 +63,7 @@ async function postBuild() {
     }
   }
 
-  // Step 2: Copy native addon files
+  // Step 3: Copy native addon files
   const audioCaptureDir = join(outdir, 'vendor', 'audio-capture')
   await cp('vendor/audio-capture', audioCaptureDir, {
     recursive: true,
@@ -68,7 +74,7 @@ async function postBuild() {
   await cp('src/utils/vendor/ripgrep', ripgrepDir, { recursive: true } as never)
   console.log(`Copied src/utils/vendor/ripgrep/ → ${ripgrepDir}/`)
 
-  // Step 3: Generate dual entry points
+  // Step 4: Generate dual entry points
   const cliBun = join(outdir, 'cli-bun.js')
   const cliNode = join(outdir, 'cli-node.js')
 

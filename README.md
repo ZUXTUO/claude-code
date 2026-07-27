@@ -137,6 +137,9 @@ bun run dev
 
 # 构建
 bun run build
+
+# 打包
+bun run package
 ```
 
 构建采用 code splitting 多文件打包（`build.ts`），产物输出到 `dist/` 目录（入口 `dist/cli.js` + 约 450 个 chunk 文件）。

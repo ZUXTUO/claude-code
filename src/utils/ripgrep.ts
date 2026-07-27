@@ -1,11 +1,10 @@
 import type { ChildProcess, ExecFileException } from 'child_process'
 import { execFile, spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import memoize from 'lodash-es/memoize.js'
 import { homedir } from 'os'
 import * as path from 'path'
 import { logEvent } from 'src/services/analytics/index.js'
-import { isInBundledMode } from './bundledMode.js'
 import { logForDebugging } from './debug.js'
 import { distRoot } from './distRoot.js'
 import { isEnvDefinedFalsy } from './envUtils.js'
@@ -44,36 +43,59 @@ export const getRipgrepConfig = memoize((): RipgrepConfig => {
     }
   }
 
-  // In bundled (native) mode, ripgrep is statically compiled into bun-internal
-  // and dispatches based on argv[0]. We spawn ourselves with argv0='rg'.
-  if (isInBundledMode()) {
-    return {
-      mode: 'embedded',
-      command: process.execPath,
-      args: ['--no-config'],
-      argv0: 'rg',
-    }
-  }
-
-  const rgRoot = path.resolve(__dirname, 'vendor', 'ripgrep')
-  const command =
+  // Search for vendored ripgrep binary across multiple locations.
+  //
+  // Context: Bun compiled exes (`bun build --compile`) set `import.meta.url` for
+  // each source module to the exe path with the module's original path appended,
+  // e.g. `file:///path/to/claude.exe/src/utils/distRoot.ts`. This causes
+  // `distRoot()` to resolve to the exe FILE path (`/path/to/claude.exe`) rather
+  // than its containing directory, making all vendor paths derived from it wrong.
+  //
+  // Solution: search across both distRoot-based AND process.execPath-based paths.
+  const archDir =
     process.platform === 'win32'
-      ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
-      : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
+      ? `${process.arch}-win32`
+      : `${process.arch}-${process.platform}`
+  const binaryName = process.platform === 'win32' ? 'rg.exe' : 'rg'
 
-  // In dev mode, the vendored binary lives under src/utils/vendor/ripgrep/
-  if (!existsSync(command)) {
-    const devRgRoot = path.resolve(__dirname, 'src', 'utils', 'vendor', 'ripgrep')
-    const devCommand =
-      process.platform === 'win32'
-        ? path.resolve(devRgRoot, `${process.arch}-win32`, 'rg.exe')
-        : path.resolve(devRgRoot, `${process.arch}-${process.platform}`, 'rg')
-    if (existsSync(devCommand)) {
-      return { mode: 'builtin', command: devCommand, args: [] }
+  const searchDirs = [
+    // distRoot-based paths (dev mode, npm dist):
+    path.resolve(__dirname, 'vendor', 'ripgrep'),
+    path.resolve(__dirname, 'src', 'utils', 'vendor', 'ripgrep'),
+    path.resolve(__dirname, 'dist', 'vendor', 'ripgrep'),
+    // process.execPath-based paths (compiled exe):
+    path.resolve(path.dirname(process.execPath), 'vendor', 'ripgrep'),
+    path.resolve(
+      path.dirname(process.execPath),
+      'src',
+      'utils',
+      'vendor',
+      'ripgrep',
+    ),
+    path.resolve(path.dirname(process.execPath), 'dist', 'vendor', 'ripgrep'),
+  ]
+
+  for (const rgRoot of searchDirs) {
+    const command = path.resolve(rgRoot, archDir, binaryName)
+    if (existsSync(command)) {
+      return { mode: 'builtin', command, args: [] }
     }
   }
 
-  return resolveBuiltinWithFallback(command)
+  // Embedded base64 mode: build.ts inlines the ripgrep binary as a base64
+  // string via the `process.env.__RG_EMBEDDED_BASE64` define. In compiled
+  // exes, this string is baked into the JS code. We decode and extract it
+  // to a persistent cache directory.
+  if (process.env.__RG_EMBEDDED_BASE64) {
+    const extracted = extractBase64Ripgrep(process.env.__RG_EMBEDDED_BASE64)
+    if (extracted) {
+      return { mode: 'builtin', command: extracted, args: [] }
+    }
+  }
+
+  return resolveBuiltinWithFallback(
+    path.resolve(searchDirs[0], archDir, binaryName),
+  )
 })
 
 /**
@@ -120,11 +142,15 @@ export function resolveBuiltinWithFallback(
   }
 
   // Neither available.
+  const installHint =
+    p === 'win32'
+      ? 'install ripgrep via `scoop install ripgrep`, `winget install BurntSushi.ripgrep.MSVC`, or `choco install ripgrep`'
+      : 'install ripgrep via apt/pkg/brew'
   return {
     mode: 'builtin',
     command: builtinPath,
     args: [],
-    note: `no ripgrep available on ${p}; install ripgrep via apt/pkg/brew`,
+    note: `no ripgrep available on ${p}; ${installHint}`,
   }
 }
 
@@ -584,6 +610,41 @@ export const countFilesRoundedRg = memoize(
   (dirPath, _abortSignal, ignorePatterns = []) =>
     `${dirPath}|${ignorePatterns.join(',')}`,
 )
+
+/**
+ * Decode and extract the base64-embedded ripgrep binary to a persistent cache
+ * directory. The base64 string was inlined by build.ts via the
+ * `process.env.__RG_EMBEDDED_BASE64` define.
+ *
+ * Returns the file path to the extracted binary, or null on failure.
+ */
+function extractBase64Ripgrep(b64: string): string | null {
+  try {
+    const isWin = process.platform === 'win32'
+    const binaryName = isWin ? 'rg.exe' : 'rg'
+    const archDir = `${process.arch}-${process.platform}`
+    const cacheDir = path.join(
+      process.env.XDG_CACHE_HOME ||
+        process.env.LOCALAPPDATA ||
+        path.join(homedir(), '.cache'),
+      'claude-code',
+      'vendor',
+      'ripgrep',
+    )
+    const targetPath = path.resolve(cacheDir, archDir, binaryName)
+
+    if (existsSync(targetPath)) return targetPath
+
+    mkdirSync(path.dirname(targetPath), { recursive: true })
+    const buf = Buffer.from(b64, 'base64')
+    writeFileSync(targetPath, buf)
+    if (!isWin) chmodSync(targetPath, 0o755)
+
+    return targetPath
+  } catch {
+    return null
+  }
+}
 
 // Singleton to store ripgrep availability status
 let ripgrepStatus: {

@@ -117,6 +117,9 @@ bun run dev
 
 # Build
 bun run build
+
+# Build
+bun run package
 ```
 
 The build uses code splitting (`build.ts`), outputting to `dist/` (entry `dist/cli.js` + ~450 chunk files).

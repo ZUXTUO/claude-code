@@ -2,12 +2,39 @@ import { readdir, readFile, writeFile, cp } from 'fs/promises'
 import { join } from 'path'
 import { getMacroDefines } from './scripts/defines.ts'
 import { DEFAULT_BUILD_FEATURES } from './scripts/defines.ts'
+import { ensureRipgrep } from './scripts/download-rg.ts'
 
 const outdir = 'dist'
 
 // Step 1: Clean output directory
-const { rmSync } = await import('fs')
+const { rmSync, readFileSync } = await import('fs')
 rmSync(outdir, { recursive: true, force: true })
+
+// Step 1.5: Ensure ripgrep binary is downloaded
+console.log('[build] Ensuring ripgrep binary...')
+await ensureRipgrep()
+
+// Read the ripgrep binary and inline as base64 via define.
+// When `bun build --compile` produces a standalone exe, the define value
+// is baked into the JS code as a literal string. At runtime, ripgrep.ts
+// detects process.env.__RG_EMBEDDED_BASE64, decodes it, and extracts the
+// binary to a temp cache directory.
+//
+// This approach works reliably with the two-step build process
+// (Bun.build() → bun build --compile) because defines are plain string
+// substitutions that survive both bundling passes.
+const rgArchDir = `${process.arch}-${process.platform}`
+const rgBinaryName = process.platform === 'win32' ? 'rg.exe' : 'rg'
+const rgSourcePath = `src/utils/vendor/ripgrep/${rgArchDir}/${rgBinaryName}`
+
+let rgBase64 = ''
+try {
+  rgBase64 = readFileSync(rgSourcePath).toString('base64')
+  const kb = Math.round((rgBase64.length * 3) / 4 / 1024)
+  console.log(`[build] Embedded ripgrep (${rgArchDir}/${rgBinaryName}, ${kb} KB raw)`)
+} catch {
+  console.warn(`[build] Warning: ${rgSourcePath} not found, ripgrep won't be embedded`)
+}
 
 // Collect FEATURE_* env vars → Bun.build features
 const envFeatures = Object.keys(process.env)
@@ -24,10 +51,11 @@ const result = await Bun.build({
   sourcemap: 'linked',
   define: {
     ...getMacroDefines(),
-    // React production mode — eliminates _debugStack Error objects
-    // (6,889 objects × ~1.7KB = 12MB in development builds) and removes
-    // prop-type / key warnings not useful in a production CLI tool.
     'process.env.NODE_ENV': JSON.stringify('production'),
+    // Inline the ripgrep binary so it ends up inside the compiled exe.
+    // The string is the minimum overhead approach: base64 → ~37% larger
+    // than the binary, but guarantees the data survives into the compiled binary.
+    'process.env.__RG_EMBEDDED_BASE64': JSON.stringify(rgBase64),
   },
   features,
 })

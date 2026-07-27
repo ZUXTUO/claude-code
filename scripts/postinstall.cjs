@@ -35,9 +35,9 @@ try {
 
 // --- Config ---
 
-const RG_VERSION = '15.0.1'
-const DEFAULT_RELEASE_BASE = `https://github.com/microsoft/ripgrep-prebuilt/releases/download/v${RG_VERSION}`
-const MIRROR_RELEASE_BASE = `https://ghproxy.net/https://github.com/microsoft/ripgrep-prebuilt/releases/download/v${RG_VERSION}`
+const RG_VERSION = '15.2.0'
+const DEFAULT_RELEASE_BASE = `https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}`
+const MIRROR_RELEASE_BASE = `https://github.com/microsoft/ripgrep-prebuilt/releases/download/v15.0.1`
 const RELEASE_BASE = (
   process.env.RIPGREP_DOWNLOAD_BASE ?? DEFAULT_RELEASE_BASE
 ).replace(/\/$/, '')
@@ -280,7 +280,13 @@ async function extractZip(buffer, binaryPath, extractedBinary) {
   }
 }
 
-async function extractTarGz(buffer, binaryPath, extractedBinary, assetName) {
+async function extractTarGz(
+  buffer,
+  binaryPath,
+  extractedBinary,
+  assetName,
+  target,
+) {
   const binaryDir = path.dirname(binaryPath)
   const tmpDir = path.join(binaryDir, '.tmp-download')
   rmSync(tmpDir, { recursive: true, force: true })
@@ -294,7 +300,15 @@ async function extractTarGz(buffer, binaryPath, extractedBinary, assetName) {
     if (result.status !== 0) {
       throw new Error(`tar extract failed: ${result.stderr?.toString()}`)
     }
-    const srcBinary = path.join(tmpDir, extractedBinary)
+
+    // Try the BurntSushi/ripgrep archive format first (binary nested
+    // under ripgrep-{VERSION}-{TARGET}/), then fall back to a direct
+    // name match (some repackages strip the top-level directory).
+    const archivePrefix = `ripgrep-${RG_VERSION}-${target}`
+    let srcBinary = path.join(tmpDir, archivePrefix, extractedBinary)
+    if (!existsSync(srcBinary)) {
+      srcBinary = path.join(tmpDir, extractedBinary)
+    }
     if (!existsSync(srcBinary)) {
       throw new Error(`Binary not found at expected path: ${srcBinary}`)
     }
@@ -308,7 +322,7 @@ async function extractTarGz(buffer, binaryPath, extractedBinary, assetName) {
 
 async function downloadAndExtract() {
   const { target, ext } = getPlatformMapping()
-  const assetName = `ripgrep-v${RG_VERSION}-${target}.${ext}`
+  const assetName = `ripgrep-${RG_VERSION}-${target}.${ext}`
 
   const binaryPath = getBinaryPath()
   const binaryDir = path.dirname(binaryPath)
@@ -326,22 +340,25 @@ async function downloadAndExtract() {
 
   const extractedBinary = process.platform === 'win32' ? 'rg.exe' : 'rg'
 
-  const mirrors = [RELEASE_BASE]
+  // Try each source in order: primary (BurntSushi) → mirror (Microsoft prebuilt)
+  const urls = [`${RELEASE_BASE}/${assetName}`]
   if (RELEASE_BASE === DEFAULT_RELEASE_BASE.replace(/\/$/, '')) {
-    mirrors.push(MIRROR_RELEASE_BASE.replace(/\/$/, ''))
+    // Microsoft prebuilt uses a different version and asset naming format
+    const msVersion = '15.0.1'
+    const msAssetName = `ripgrep-v${msVersion}-${target}.${ext}`
+    urls.push(`${MIRROR_RELEASE_BASE.replace(/\/$/, '')}/${msAssetName}`)
   }
 
   let buffer
   let lastError
-  for (const base of mirrors) {
-    const url = `${base}/${assetName}`
+  for (const url of urls) {
     try {
       console.log(`[ripgrep] Trying ${url}`)
       buffer = await downloadUrlToBufferWithFallback(url)
       break
     } catch (e) {
       console.warn(
-        `[ripgrep] Download from ${base} failed: ${e instanceof Error ? e.message : e}`,
+        `[ripgrep] Download from ${url} failed: ${e instanceof Error ? e.message : e}`,
       )
       lastError = e
     }
@@ -356,7 +373,7 @@ async function downloadAndExtract() {
     mkdirSync(binaryDir, { recursive: true })
 
     if (ext === 'tar.gz') {
-      await extractTarGz(buffer, binaryPath, extractedBinary, assetName)
+      await extractTarGz(buffer, binaryPath, extractedBinary, assetName, target)
     } else {
       await extractZip(buffer, binaryPath, extractedBinary)
     }
