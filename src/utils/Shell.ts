@@ -29,7 +29,7 @@ import { which } from './which.js'
 
 export type { ExecResult } from './ShellCommand.js'
 
-import { accessSync } from 'fs'
+import { accessSync, existsSync } from 'fs'
 import { onCwdChangedForHooks } from './hooks/fileChangedWatcher.js'
 import { getClaudeTempDirName } from './permissions/filesystem.js'
 import { getPlatform } from './platform.js'
@@ -48,11 +48,34 @@ export type ShellConfig = {
   provider: ShellProvider
 }
 
+/**
+ * On Windows, check if a path is related to WSL.
+ * WSL paths contain "wsl" or are in the WindowsApps directory
+ * (the default Microsoft Store app install location that hosts wsl.exe).
+ * Spawning these from a native Windows process creates a visible WSL console window.
+ */
+function isWslPath(shellPath: string): boolean {
+  const lower = shellPath.toLowerCase()
+  return lower.includes('wsl') || lower.includes('windowsapps')
+}
+
 function isExecutable(shellPath: string): boolean {
   try {
     accessSync(shellPath, fsConstants.X_OK)
     return true
   } catch (_err) {
+    // On Windows, do NOT use execFileSync as fallback — it triggers WSL.exe
+    // via the WSL interop layer (`/bin/bash` → WSL.exe), creating a visible
+    // terminal window that may flash and fail.
+    if (process.platform === 'win32') {
+      // On Windows, any existing .exe is executable; for non-.exe files,
+      // just check the file exists (WSL interop paths like /bin/bash won't
+      // appear as regular files through native Windows stat()).
+      if (shellPath.toLowerCase().endsWith('.exe')) {
+        return existsSync(shellPath)
+      }
+      return false
+    }
     // Fallback for Nix and other environments where X_OK check might fail
     try {
       // Try to execute the shell with --version, which should exit quickly
@@ -66,6 +89,70 @@ function isExecutable(shellPath: string): boolean {
       return false
     }
   }
+}
+
+/**
+ * Windows-specific shell detection.
+ *
+ * On Windows, we must NOT probe Unix-style paths (`/bin/bash`, etc.) because:
+ * 1. These paths don't exist as native Windows files
+ * 2. Windows WSL interop makes them appear as valid files to some APIs
+ * 3. Attempting to execute them triggers WSL.exe, creating visible terminal windows
+ *
+ * Resolution order:
+ *   1. CLAUDE_CODE_SHELL env var (user override)
+ *   2. which('bash') — but filter out WSL-related paths
+ *   3. Common Git Bash install locations
+ *   4. Helpful error with installation guidance
+ */
+async function findWindowsShell(): Promise<string> {
+  // 1. Check for explicit shell override
+  const shellOverride = process.env.CLAUDE_CODE_SHELL
+  if (shellOverride) {
+    const isSupported =
+      shellOverride.includes('bash') || shellOverride.includes('zsh')
+    if (isSupported && isExecutable(shellOverride)) {
+      logForDebugging(`Using shell override: ${shellOverride}`)
+      return shellOverride
+    }
+    logForDebugging(
+      `CLAUDE_CODE_SHELL="${shellOverride}" is not a valid bash/zsh path, falling back to detection`,
+    )
+  }
+
+  // 2. Try which('bash') — Bun.which on Windows looks through PATH
+  const bashPath = await which('bash')
+  if (bashPath) {
+    // Filter out WSL-sourced paths — they would create visible WSL windows
+    if (isWslPath(bashPath)) {
+      logForDebugging(`Ignoring WSL bash path from which(): ${bashPath}`)
+    } else if (isExecutable(bashPath)) {
+      logForDebugging(`Found bash via which(): ${bashPath}`)
+      return bashPath
+    }
+  }
+
+  // 3. Check common Git Bash install paths
+  const commonGitPaths = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  ]
+  for (const p of commonGitPaths) {
+    if (isExecutable(p)) {
+      logForDebugging(`Found bash at Git path: ${p}`)
+      return p
+    }
+  }
+
+  // 4. No valid shell found — throw with clear guidance
+  const errorMsg =
+    'No suitable POSIX shell (bash/zsh) found on Windows.\n' +
+    'Claude CLI requires a POSIX shell for the Bash tool. Options:\n' +
+    '  1. Install Git Bash from https://git-scm.com (recommended)\n' +
+    '  2. Set CLAUDE_CODE_SHELL env var to the full path of bash.exe\n' +
+    '  3. Use defaultShell: "powershell" in settings if you only need PowerShell'
+  logError(new Error(errorMsg))
+  throw new Error(errorMsg)
 }
 
 /**
@@ -89,6 +176,12 @@ export async function findSuitableShell(): Promise<string> {
     }
   }
 
+  // === WINDOWS: Use Windows-safe detection that won't trigger WSL.exe ===
+  if (process.platform === 'win32') {
+    return findWindowsShell()
+  }
+
+  // === POSIX (macOS, Linux, WSL): existing logic ===
   // Check user's preferred shell from environment
   const env_shell = process.env.SHELL
   // Only consider SHELL if it's bash or zsh

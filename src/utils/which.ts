@@ -36,6 +36,7 @@ function whichNodeSync(command: string): string | null {
       const result = execSync_DEPRECATED(`where.exe ${command}`, {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
       })
       const output = result.toString().trim()
       return output.split(/\r?\n/)[0] || null

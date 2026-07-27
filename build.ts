@@ -31,9 +31,13 @@ let rgBase64 = ''
 try {
   rgBase64 = readFileSync(rgSourcePath).toString('base64')
   const kb = Math.round((rgBase64.length * 3) / 4 / 1024)
-  console.log(`[build] Embedded ripgrep (${rgArchDir}/${rgBinaryName}, ${kb} KB raw)`)
+  console.log(
+    `[build] Embedded ripgrep (${rgArchDir}/${rgBinaryName}, ${kb} KB raw)`,
+  )
 } catch {
-  console.warn(`[build] Warning: ${rgSourcePath} not found, ripgrep won't be embedded`)
+  console.warn(
+    `[build] Warning: ${rgSourcePath} not found, ripgrep won't be embedded`,
+  )
 }
 
 // Collect FEATURE_* env vars → Bun.build features
