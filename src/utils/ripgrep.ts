@@ -61,6 +61,18 @@ export const getRipgrepConfig = memoize((): RipgrepConfig => {
       ? path.resolve(rgRoot, `${process.arch}-win32`, 'rg.exe')
       : path.resolve(rgRoot, `${process.arch}-${process.platform}`, 'rg')
 
+  // In dev mode, the vendored binary lives under src/utils/vendor/ripgrep/
+  if (!existsSync(command)) {
+    const devRgRoot = path.resolve(__dirname, 'src', 'utils', 'vendor', 'ripgrep')
+    const devCommand =
+      process.platform === 'win32'
+        ? path.resolve(devRgRoot, `${process.arch}-win32`, 'rg.exe')
+        : path.resolve(devRgRoot, `${process.arch}-${process.platform}`, 'rg')
+    if (existsSync(devCommand)) {
+      return { mode: 'builtin', command: devCommand, args: [] }
+    }
+  }
+
   return resolveBuiltinWithFallback(command)
 })
 
