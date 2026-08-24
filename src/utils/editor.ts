@@ -103,7 +103,12 @@ export function openFileInExternalEditor(
       // string; cmd.exe doesn't expand $() or backticks inside double quotes.
       // Quote each arg so paths with spaces survive the shell join.
       const gotoStr = gotoArgv.map(a => `"${a}"`).join(' ')
-      child = spawn(`${editor} ${gotoStr}`, { ...detachedOpts, shell: true })
+      child = spawn(`${editor} ${gotoStr}`, {
+        ...detachedOpts,
+        shell: true,
+        // Prevent visible console window on Windows (no-op on other platforms)
+        windowsHide: true,
+      })
     } else {
       // POSIX: argv array with no shell — injection-safe. shell: true would
       // expand $() / backticks inside double quotes, and filePath is

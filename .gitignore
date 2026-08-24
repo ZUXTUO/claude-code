@@ -57,3 +57,4 @@ credentials.json
 .squash-tmp/
 .git.*-backup
 claude.exe
+claude

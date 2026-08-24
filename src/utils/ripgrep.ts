@@ -316,6 +316,8 @@ function ripGrepRaw(
       signal: abortSignal,
       timeout,
       killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
+      // Prevent visible console window on Windows (no-op on other platforms)
+      windowsHide: true,
     },
     callback,
   )

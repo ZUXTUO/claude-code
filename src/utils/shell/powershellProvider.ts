@@ -70,34 +70,43 @@ export function createPowerShellProvider(shellPath: string): ShellProvider {
       // the sandbox path, build a command that itself invokes pwsh with the
       // full flag set. Shell.ts passes /bin/sh as the sandbox binShell,
       // producing: bwrap ... sh -c 'pwsh -NoProfile ... -EncodedCommand ...'.
-      // The non-sandbox path returns the bare PS command; getSpawnArgs() adds
-      // the flags via buildPowerShellArgs().
+      // The non-sandbox path also uses -EncodedCommand for consistency and
+      // reliability — base64 encoding avoids all quoting issues with special
+      // characters ($, ', ", !, etc.) that -Command/plain string would suffer.
+      // getSpawnArgs() passes to -EncodedCommand (or nil for sandbox, since
+      // the inline pwsh call already has the -EncodedCommand flag).
       //
       // -EncodedCommand (base64 UTF-16LE), not -Command: the sandbox runtime
       // applies its OWN shellquote.quote() on top of whatever we build. Any
       // string containing ' triggers double-quote mode which escapes ! as \! —
       // POSIX sh preserves that literally, pwsh parse error. Base64 is
       // [A-Za-z0-9+/=] — no chars that any quoting layer can corrupt.
+      // For non-sandbox, base64 also avoids PowerShell interpretation of $, (),
+      // pipe and special chars that the model loves to emit.
       // Review 2964609818.
       //
       // shellPath is POSIX-single-quoted so a space-containing install path
       // (e.g. /opt/my tools/pwsh) survives the inner `/bin/sh -c` word-split.
       // Flags and base64 are [A-Za-z0-9+/=-] only — no quoting needed.
+      const encodedPsCommand = encodePowerShellCommand(psCommand)
       const commandString = opts.useSandbox
         ? [
             `'${shellPath.replace(/'/g, `'\\''`)}'`,
             '-NoProfile',
             '-NonInteractive',
             '-EncodedCommand',
-            encodePowerShellCommand(psCommand),
+            encodedPsCommand,
           ].join(' ')
-        : psCommand
+        : encodedPsCommand
 
       return { commandString, cwdFilePath }
     },
 
     getSpawnArgs(commandString: string): string[] {
-      return buildPowerShellArgs(commandString)
+      // Both sandboxed and non-sandboxed paths now produce base64-encoded
+      // command strings via -EncodedCommand. The hooks.ts path uses
+      // buildPowerShellArgs() directly (plain text, -Command).
+      return ['-NoProfile', '-NonInteractive', '-EncodedCommand', commandString]
     },
 
     async getEnvironmentOverrides(): Promise<Record<string, string>> {

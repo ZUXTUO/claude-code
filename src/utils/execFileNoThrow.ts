@@ -117,6 +117,9 @@ export function execFileNoThrowWithCwd(
       stdin: finalStdin,
       input: finalInput,
       reject: false, // Don't throw on non-zero exit codes
+      // Prevent visible console window on Windows (no-op on other platforms).
+      // Without this, every execa call flashes a terminal window on Windows.
+      windowsHide: true,
     })
       .then(result => {
         if (result.failed) {
